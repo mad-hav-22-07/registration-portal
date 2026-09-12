@@ -21,9 +21,12 @@
 
 <h2>Registrations</h2>
 
-<label for="key">Admin key</label>
-<input id="key" type="password" placeholder="ADMIN_KEY from .env">
-<button id="load">Show counts</button>
+<form id="f">
+  <label for="key">Admin key</label>
+  <input id="key" type="password" placeholder="ADMIN_KEY from .env">
+  <button id="load" type="submit">Show counts</button>
+</form>
+<p><a href="#" id="forget" style="color:#2b6cb0;font-size:13px">forget this key on this device</a></p>
 
 <div id="counts"></div>
 <div id="out"></div>
@@ -34,20 +37,40 @@ const $ = (id) => document.getElementById(id);
 // remembered per browser only, so the key is not retyped on every visit
 try { $('key').value = localStorage.getItem('adminKey') || ''; } catch {}
 
-$('load').onclick = async () => {
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+$('forget').onclick = (e) => {
+  e.preventDefault();
+  try { localStorage.removeItem('adminKey'); } catch {}
+  $('key').value = '';
+  $('counts').innerHTML = '';
+  $('out').innerHTML = '<div style="padding:10px;border-radius:8px;background:#f7fafc;font-size:13px">Key cleared from this browser.</div>';
+};
+
+$('f').onsubmit = async (e) => {
+  e.preventDefault();
   const key = $('key').value.trim();
   if (!key) return;
-  try { localStorage.setItem('adminKey', key); } catch {}
-
+  const btn = $('load');
+  btn.disabled = true;
   $('out').innerHTML = '';
-  const r = await fetch('/api/stats', { headers: { 'x-admin-key': key } });
-  const d = await r.json();
 
-  if (d.error) {
-    $('counts').innerHTML = '';
-    $('out').innerHTML = `<div class="err">${d.error}</div>`;
-    return;
-  }
+  try {
+    const r = await fetch('/api/stats', { headers: { 'x-admin-key': key } });
+    const text = await r.text();
+    let d;
+    try { d = JSON.parse(text); } catch {
+      throw new Error(`The server returned an unexpected response (${r.status}).`);
+    }
+
+    if (d.error) {
+      $('counts').innerHTML = '';
+      $('out').innerHTML = `<div class="err">${esc(d.error)}</div>`;
+      return;
+    }
+    // only remember the key once the server has actually accepted it, or a typo
+    // gets autofilled forever and looks like a server fault
+    try { localStorage.setItem('adminKey', key); } catch {}
 
   $('counts').innerHTML = `
     <div><b>${d.individuals}</b><small>individuals</small></div>
@@ -55,8 +78,14 @@ $('load').onclick = async () => {
     <div><b>${d.schoolStudents}</b><small>school students</small></div>`;
   $('out').innerHTML = `<button id="dl">Download Excel</button>`;
 
-  // the key has to ride in the URL here: a browser download is a plain
-  // navigation, so it cannot carry a custom header
-  $('dl').onclick = () => { location.href = '/api/export.xlsx?key=' + encodeURIComponent(key); };
+    // the key has to ride in the URL here: a browser download is a plain
+    // navigation, so it cannot carry a custom header
+    $('dl').onclick = () => { location.href = '/api/export.xlsx?key=' + encodeURIComponent(key); };
+  } catch (err) {
+    $('counts').innerHTML = '';
+    $('out').innerHTML = `<div class="err">${esc(err.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
 };
 </script>

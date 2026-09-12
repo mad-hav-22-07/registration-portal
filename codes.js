@@ -36,13 +36,35 @@ export const slots = A ** LETTERS; // 17,576 per prefix
  * and return it zero-padded for use inside a code. null if it is not 8-10.
  */
 export function parseClass(value) {
-  const raw = String(value ?? '').trim();
+  // An array stringifies to "1,0" and became class 10; an object to
+  // "[object Object]". Only a string or a number is a class.
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  const raw = String(value).trim();
   if (!raw) return null;
 
-  const roman = { X: '10', IX: '9', VIII: '8' }[raw.toUpperCase().replace(/[^IVX]/g, '')];
-  const digits = roman ?? raw.replace(/[^\d]/g, '');
-  if (!CLASSES.includes(digits)) return null;
-  return digits.padStart(2, '0'); // 8 -> "08", 10 -> "10"
+  let n = null;
+  const digits = raw.replace(/[^0-9]/g, '');
+
+  if (digits) {
+    // Digits always win. Checking roman numerals first made "Exam 9" parse as X
+    // (the stray X) and land a class-9 student in class 10.
+    // Number() also drops the padding Excel leaves on text cells: "08" -> 8.
+    n = String(Number(digits));
+  } else {
+    // Roman only when the whole token is one, so "Sixth" does not become IX.
+    // A trailing section letter is allowed: "VIII-A" is class 8.
+    const WORD = /CLASS|STD|STANDARD|GRADE/;
+    const alpha = raw.toUpperCase().replace(/[^A-Z]/g, '')
+      .replace(new RegExp('^(' + WORD.source + ')'), '')
+      .replace(new RegExp('(' + WORD.source + ')$'), '')
+      // ordinal suffix before the section letter, or "Xth" loses its h to [A-H]
+      .replace(/(TH|ST|ND|RD)$/, '')
+      .replace(/[A-H]$/, '');
+    n = { X: '10', IX: '9', VIII: '8' }[alpha] ?? null;
+  }
+
+  if (!CLASSES.includes(n)) return null;
+  return n.padStart(2, '0'); // 8 -> "08", 10 -> "10"
 }
 
 /**
@@ -68,10 +90,27 @@ export function toLetters(slot) {
   return out;
 }
 
+/**
+ * Key used to decide whether two school names are "the same school".
+ *
+ * "St. Thomas H.S.S" and "st thomas hss" must collapse together, or a school
+ * registering twice gets two codes. But letters of EVERY script have to survive:
+ * stripping to [a-z0-9] turned every Malayalam-script name into the empty
+ * string, so only one such school per district could ever register.
+ *
+ * Accents are folded rather than deleted, so "Kochí HSS" and "Kochi HSS" are one
+ * school instead of two.
+ */
 export function normalize(name) {
-  // "St. Thomas H.S.S" and "st thomas hss" must hash to the same slot, or one
-  // school registering twice would be given two different codes.
-  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return String(name ?? '')
+    .normalize('NFD')
+    // Latin diacritics only (U+0300-U+036F). Stripping every combining mark
+    // would delete Malayalam vowel signs and virama, which collapses genuinely
+    // different names: കേരളം and കരളം are not the same school.
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    // keep marks, so Indic scripts survive intact
+    .replace(/[^\p{L}\p{N}\p{M}]/gu, '');
 }
 
 /**
@@ -111,8 +150,10 @@ export async function claim(probeSeq, insert, codeConstraint) {
       await insert(code);
       return { code, attempts };
     } catch (e) {
-      const tookThatSlot =
-        e.code === '23505' && (e.constraint === codeConstraint || /pkey/.test(e.constraint || ''));
+      // Only a violation of THIS code's own constraint means the slot is taken.
+      // A /pkey/ pattern match would also swallow a 23505 from any other table,
+      // turning an unrelated bug into 17,576 pointless retries.
+      const tookThatSlot = e?.code === '23505' && !!codeConstraint && e.constraint === codeConstraint;
       if (tookThatSlot) continue;
       throw e;
     }

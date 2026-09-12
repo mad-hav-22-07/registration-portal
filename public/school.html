@@ -33,6 +33,7 @@
     <h3>Already registered?</h3>
     <small>Enter the school code you were given to upload more students.</small>
     <form id="formC">
+      <label for="ccode">School code</label>
       <input id="ccode" placeholder="07KBO" maxlength="6" autocomplete="off"
              style="text-transform:uppercase;font-family:ui-monospace,monospace;letter-spacing:1px" required>
       <button class="go" type="submit">Continue</button>
@@ -55,33 +56,72 @@
     <small>Columns: <b>Name, Email, Contact Number, Class</b>. Class must be 8, 9 or 10.</small>
 
     <form id="formU">
+      <label for="confirm">Your email or contact number</label>
+      <input id="confirm" name="email" autocomplete="off" required>
+      <small>the one this school registered with — confirms the upload is really from you</small>
+
       <label for="file">Filled-in sheet (.xlsx or .csv)</label>
-      <input type="file" id="file" name="file" accept=".xlsx,.xls,.csv" required>
+      <input type="file" id="file" name="file" accept=".xlsx,.csv" required>
       <button class="go" type="submit">Upload and generate roll numbers</button>
     </form>
   </div>
 </div>
 
+<p id="back" hidden style="margin-top:16px">
+  <a href="#" id="backLink" style="color:#2b6cb0;font-size:13px">← register or open a different school</a>
+</p>
+
 <div id="out"></div>
 
 <script>
 const $ = (id) => document.getElementById(id);
-const esc = (v) => String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-fetch('/api/options').then((r) => r.json()).then(({ districts }) => {
-  for (const { code, name } of districts) {
-    $('district').insertAdjacentHTML('beforeend', `<option value="${code}">${code} — ${name}</option>`);
+/**
+ * A proxy, a platform limit or a cold start can answer with an HTML error page.
+ * r.json() then throws "Unexpected token '<'", which means nothing to a teacher.
+ */
+async function safeJson(r) {
+  const text = await r.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(r.status === 413
+      ? 'That file is too large. Split the sheet into smaller files.'
+      : `The server returned an unexpected response (${r.status}). Try again in a moment.`);
   }
-});
+}
+
+// Without a catch, a failed first request leaves the required District dropdown
+// empty and the form permanently unsubmittable with no explanation.
+fetch('/api/options')
+  .then((r) => r.json())
+  .then(({ districts }) => {
+    for (const { code, name } of districts) {
+      $('district').insertAdjacentHTML('beforeend', `<option value="${code}">${code} — ${name}</option>`);
+    }
+  })
+  .catch(() => {
+    $('out').innerHTML = '<div class="err">Could not reach the server. Reload the page and try again.</div>';
+  });
 
 function openUpload(code, name, studentCount) {
   $('bulkCode').textContent = code;
   $('bulkName').innerHTML = esc(name) + (studentCount ? `<br>${studentCount} student(s) already uploaded` : '');
   $('stage1').hidden = true;
   $('stage2').hidden = false;
+  $('back').hidden = false;
   $('out').innerHTML = '';
   scrollTo(0, 0);
 }
+
+$('backLink').onclick = (e) => {
+  e.preventDefault();
+  $('stage2').hidden = true;
+  $('back').hidden = true;
+  $('stage1').hidden = false;
+  $('out').innerHTML = '';
+};
 
 /* register a new school */
 $('formS').onsubmit = async (e) => {
@@ -96,11 +136,19 @@ $('formS').onsubmit = async (e) => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(Object.fromEntries(new FormData(e.target))),
     });
-    const d = await r.json();
-    if (d.error) $('out').innerHTML = `<div class="err">${d.error}</div>`;
-    else openUpload(d.code, d.name);
+    const d = await safeJson(r);
+    if (d.error) {
+      $('out').innerHTML = `<div class="err">${esc(d.error)}</div>`;
+    } else {
+      openUpload(d.code, `${d.name}, ${d.district}`, d.students);
+      if (d.already) {
+        $('out').innerHTML =
+          '<div class="step"><h3>This school was already registered</h3>' +
+          '<small>Your contact details have been updated and the same school code kept.</small></div>';
+      }
+    }
   } catch (err) {
-    $('out').innerHTML = `<div class="err">${err.message}</div>`;
+    $('out').innerHTML = `<div class="err">${esc(err.message)}</div>`;
   } finally {
     btn.disabled = false;
     btn.textContent = 'Register school and get code';
@@ -111,11 +159,23 @@ $('formS').onsubmit = async (e) => {
 $('formC').onsubmit = async (e) => {
   e.preventDefault();
   const code = $('ccode').value.trim().toUpperCase();
+  const btn = e.target.querySelector('button.go');
   $('cout').innerHTML = '';
-  const r = await fetch('/api/schools/' + encodeURIComponent(code));
-  const d = await r.json();
-  if (!r.ok) $('cout').innerHTML = `<div class="err">${d.error}</div>`;
-  else openUpload(d.code, `${d.name}, ${d.districtName}`, d.students);
+  if (!code) {
+    $('cout').innerHTML = '<div class="err">Enter your school code.</div>';
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/schools/' + encodeURIComponent(code));
+    const d = await safeJson(r);
+    if (!r.ok) $('cout').innerHTML = `<div class="err">${esc(d.error)}</div>`;
+    else openUpload(d.code, `${d.name}, ${d.districtName}`, d.students);
+  } catch (err) {
+    $('cout').innerHTML = `<div class="err">${esc(err.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
 };
 
 /* upload the sheet */
@@ -132,16 +192,16 @@ $('formU').onsubmit = async (e) => {
       method: 'POST',
       body: new FormData(e.target),
     });
-    const d = await r.json();
+    const d = await safeJson(r);
     if (d.error) {
-      $('out').innerHTML = `<div class="err">${d.error}</div>`;
+      $('out').innerHTML = `<div class="err">${esc(d.error)}</div>`;
     } else {
       $('out').innerHTML = renderUpload(d);
       if (d.added.length) wireDownload(d);
       e.target.reset();
     }
   } catch (err) {
-    $('out').innerHTML = `<div class="err">${err.message}</div>`;
+    $('out').innerHTML = `<div class="err">${esc(err.message)}</div>`;
   } finally {
     btn.disabled = false;
     btn.textContent = 'Upload and generate roll numbers';
@@ -192,7 +252,9 @@ function wireDownload(d) {
     a.href = url;
     a.download = `roll-numbers-${d.schoolCode}.csv`;
     a.click();
-    URL.revokeObjectURL(url);
+    // Revoking synchronously can cancel the download before the browser has
+    // queued it; one tick is enough.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   };
 }
 </script>

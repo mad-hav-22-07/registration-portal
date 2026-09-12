@@ -36,3 +36,7 @@ td.roll { font-family: ui-monospace, monospace; font-weight: 600; }
 .summary div { flex: 1; padding: 11px; text-align: center; border-radius: 8px; background: #f7fafc; border: 1px solid #e2e8f0; }
 .summary b { display: block; font-size: 21px; }
 .summary small { font-size: 11px; }
+
+/* long unbreakable tokens in the skipped-rows table must not scroll the page */
+.scroll { overflow-x: auto; }
+.scroll td { word-break: break-word; }

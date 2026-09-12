@@ -29,10 +29,18 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-fetch('/api/options').then((r) => r.json()).then(({ classes }) => {
-  for (const c of classes) $('class').insertAdjacentHTML('beforeend', `<option value="${c}">Class ${c}</option>`);
-});
+// Without a catch, a failed first request leaves the required dropdown empty and
+// the form permanently unsubmittable with no explanation.
+fetch('/api/options')
+  .then((r) => r.json())
+  .then(({ classes }) => {
+    for (const c of classes) $('class').insertAdjacentHTML('beforeend', `<option value="${c}">Class ${c}</option>`);
+  })
+  .catch(() => {
+    $('out').innerHTML = '<div class="err">Could not reach the server. Reload the page and try again.</div>';
+  });
 
 $('f').onsubmit = async (e) => {
   e.preventDefault();
@@ -50,18 +58,18 @@ $('f').onsubmit = async (e) => {
     const d = await r.json();
 
     if (d.error) {
-      $('out').innerHTML = `<div class="err">${d.error}</div>`;
+      $('out').innerHTML = `<div class="err">${esc(d.error)}</div>`;
     } else {
       $('out').innerHTML = `
         <div class="result">
           <div>Your roll number</div>
           <div class="big">${d.roll}</div>
-          <small>${d.name} · Class ${d.class}<br>write it down, you will need it</small>
+          <small>${esc(d.name)} · Class ${d.class}<br>write it down, you will need it</small>
         </div>`;
       $('f').reset();
     }
   } catch (err) {
-    $('out').innerHTML = `<div class="err">${err.message}</div>`;
+    $('out').innerHTML = `<div class="err">${esc(err.message)}</div>`;
   } finally {
     btn.disabled = false;
     btn.textContent = 'Register';

@@ -14,5 +14,8 @@
   },
   "devDependencies": {
     "vercel": "^59.16.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
