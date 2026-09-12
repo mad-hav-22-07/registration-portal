@@ -8,9 +8,13 @@ with two sheets.
 
 ```bash
 npm install
-cp .env.example .env      # put your DATABASE_URL and ADMIN_KEY in
+cp .env.example .env      # put your ADMIN_KEY in
 npm start
 ```
+
+Both `.env` and `.env.local` are read, with `.env.local` winning — so
+`vercel env pull` can drop the database credentials in without disturbing
+anything you typed by hand.
 
 - `http://localhost:3002` — registration (two tabs: Student/Teacher, School)
 - `http://localhost:3002/admin.html` — counts and the Excel download
@@ -62,7 +66,7 @@ can be joined and filtered without a lookup.
 npm i -g vercel
 vercel login
 vercel link
-vercel integration add neon      # provisions Postgres, sets DATABASE_URL
+vercel integration add neon      # provisions Postgres, writes .env.local
 vercel env add ADMIN_KEY         # paste your admin key
 vercel deploy --prod
 ```

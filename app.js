@@ -1,15 +1,21 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
 import express from 'express';
 import pg from 'pg';
 import ExcelJS from 'exceljs';
 import { DISTRICTS, rollProbe, schoolProbe, normalize, claim } from './codes.js';
 
+// `vercel env pull` writes .env.local, so read that first and fall back to .env.
+// Earlier entries win, which keeps hand-written values in .env from being lost.
+dotenv.config({ path: ['.env.local', '.env'], quiet: true });
+
 const { DATABASE_URL, ADMIN_KEY, PORT = 3002 } = process.env;
 
 const pool = new pg.Pool({
   connectionString: DATABASE_URL,
-  // Neon and RDS both require TLS; a local postgres usually has none.
-  ssl: /localhost|127\.0\.0\.1/.test(DATABASE_URL || '') ? false : { rejectUnauthorized: false },
+  // Verify the server certificate properly — this connection carries names,
+  // emails and phone numbers. Neon and RDS both present publicly trusted certs.
+  // A local postgres normally has no TLS at all, hence the exception.
+  ssl: /localhost|127\.0\.0\.1/.test(DATABASE_URL || '') ? false : true,
   max: 5,
 });
 
@@ -237,11 +243,31 @@ app.get('/api/export.xlsx', async (req, res) => {
   console.log(`exported ${participants.rowCount} participants, ${schools.rowCount} schools`);
 });
 
-setup()
+/**
+ * Neon's free tier suspends the database when idle, so the first connection
+ * after a quiet spell can be refused outright — sometimes with an empty error
+ * message. Retry a few times rather than crashing on a sleeping database.
+ */
+async function setupWithRetry(tries = 5) {
+  for (let i = 1; i <= tries; i++) {
+    try {
+      await setup();
+      return;
+    } catch (e) {
+      const why = e.message || e.code || 'connection refused';
+      if (i === tries) throw new Error(why);
+      const wait = 2000 * i;
+      console.log(`database not ready (${why}) — retrying in ${wait / 1000}s [${i}/${tries - 1}]`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+}
+
+setupWithRetry()
   .then(() => app.listen(PORT, () => console.log(`open http://localhost:${PORT}`)))
   .catch((e) => {
     console.error('could not start:', e.message);
-    console.error(DATABASE_URL ? '' : 'DATABASE_URL is not set — see README');
+    if (!DATABASE_URL) console.error('DATABASE_URL is not set — see README');
     process.exit(1);
   });
 
