@@ -60,9 +60,11 @@
       <input id="confirm" name="email" autocomplete="off" required>
       <small>the one this school registered with — confirms the upload is really from you</small>
 
-      <label for="file">Filled-in sheet (.xlsx or .csv)</label>
+      <label for="file">Your student sheet (.xlsx or .csv)</label>
       <input type="file" id="file" name="file" accept=".xlsx,.csv" required>
-      <button class="go" type="submit">Upload and generate roll numbers</button>
+      <small>Any column order or heading works — it reads the values, not the headings.
+        You will see what it found before anything is saved.</small>
+      <button class="go" type="submit">Check my sheet</button>
     </form>
   </div>
 </div>

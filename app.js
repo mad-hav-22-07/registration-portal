@@ -401,8 +401,29 @@ app.post('/api/schools/:code/upload', uploadLimit, upload.single('file'), route(
 
     if (!req.file) throw bad('attach the filled-in sheet');
 
-    const { rows, columns, blankRows, sheetName } = await parseSheet(req.file.buffer, req.file.originalname);
-    if (!rows.length) throw bad('the sheet has column headings but no rows below them');
+    // An explicit column choice from the teacher, when the automatic guess was wrong
+    let override = null;
+    if (req.body.mapping) {
+      try { override = JSON.parse(req.body.mapping); } catch { throw bad('could not read the column choices'); }
+    }
+
+    const parsed = await parseSheet(req.file.buffer, req.file.originalname, override);
+    const { rows, columns, blankRows, sheetName, mapping, detectedBy, corrections, sheetNames } = parsed;
+    if (!rows.length) throw bad('found the columns, but there are no student rows below them');
+
+    // Preview: report what would happen and write nothing. Lets a teacher see
+    // which column was read as what before any roll number is issued.
+    if (req.body.preview) {
+      const sample = rows.slice(0, 6).map((r) => ({
+        row: r.row, name: r.name, email: r.email, mobile: r.mobile, class: r.class,
+        ok: !!(clean(r.name, 300).length >= 2 && isEmail(clean(r.email, 300).toLowerCase()) && mobile10(r.mobile) && parseClass(r.class)),
+      }));
+      return res.json({
+        preview: true, schoolCode, schoolName: school.rows[0].name,
+        sheetName, sheetNames, mapping, detectedBy, corrections,
+        dataRows: rows.length, blankRows, sample,
+      });
+    }
 
     const district = school.rows[0].district;
     const added = [];
@@ -453,7 +474,8 @@ app.post('/api/schools/:code/upload', uploadLimit, upload.single('file'), route(
     // dataRows lets the school check nothing was lost: added + skipped must equal it
     res.json({
       schoolCode, schoolName: school.rows[0].name, sheetName,
-      columnsFound: columns, dataRows: rows.length, blankRows,
+      columnsFound: columns, mapping, detectedBy, corrections,
+      dataRows: rows.length, blankRows,
       added, skipped,
     });
   } catch (e) {

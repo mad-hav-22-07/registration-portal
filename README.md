@@ -59,7 +59,23 @@ Template is on the page (`/api/template.xlsx`): **Name, Email, Contact Number,
 Class**. Class must be 8, 9 or 10 and is required for every student, because the
 roll number is built from it.
 
-Real sheets never match the template, so the parser is deliberately loose:
+**A wrong template still works.** The headings are a hint, not a requirement —
+what a column holds decides what it is:
+
+- **No heading row at all?** Fine. An email looks like an email and a 10-digit
+  number looks like a phone number, so the columns are worked out from the values.
+- **Headings we have never seen** (`Pupil Identifier`, `Reach At`, `Which Std`,
+  or headings in Malayalam)? Read from the values instead.
+- **Headings that lie?** A column headed `Email` that holds phone numbers is
+  overruled by the column that actually holds the emails, and the swap is
+  reported back.
+- **Still wrong?** The page shows which column it read as what, plus the first
+  six rows, *before anything is saved*. If the guess is wrong there are
+  dropdowns to set the columns by hand and re-read.
+
+Nothing is written until the teacher looks at that preview and agrees.
+
+On top of that:
 
 - **Columns matched by meaning, in any order** — `Student Name` / `Full Name`;
   `Phone Number` / `Contact No` / `WhatsApp`; `E-Mail ID` / `Mail`;

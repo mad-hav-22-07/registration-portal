@@ -59,6 +59,87 @@ function cellText(cell) {
   return '';
 }
 
+/* -- working out what a column holds by looking at it ---------------------- */
+
+const looksEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v);
+
+const looksMobile = (v) => {
+  if (!/^[+\d][\d\s().+-]*$/.test(v)) return false;
+  let d = v.replace(/\D/g, '').replace(/^0+/, '');
+  if (d.length === 12 && d.startsWith('91')) d = d.slice(2);
+  return /^[6-9]\d{9}$/.test(d);
+};
+
+const looksClass = (v) => {
+  const digits = v.replace(/[^0-9]/g, '');
+  if (digits) return ['8', '9', '10'].includes(String(Number(digits)));
+  return /^(CLASS|STD|STANDARD|GRADE)?\s*(VIII|IX|X)(TH|ST|ND|RD)?[-\s]?[A-H]?$/i.test(v.trim());
+};
+
+// A name is whatever is left: has a letter, and is not one of the above.
+const looksName = (v) => /\p{L}/u.test(v) && !looksEmail(v) && !looksMobile(v) && !looksClass(v);
+
+/**
+ * Work out which column is which from the VALUES, ignoring the headings.
+ *
+ * This is what makes a wrong template still work. A school that renames the
+ * columns, reorders them, writes them in Malayalam, or sends a sheet with no
+ * heading row at all still gets parsed, because an email looks like an email and
+ * a 10-digit number looks like a phone number whatever the column is called.
+ */
+export function inferColumns(ws, firstDataRow) {
+  const lastRow = Math.min(ws.rowCount, firstDataRow + 40);
+  const lastCol = Math.min(ws.columnCount || 20, 30);
+  const tests = { email: looksEmail, mobile: looksMobile, class: looksClass, name: looksName };
+  const scores = {};
+
+  for (let col = 1; col <= lastCol; col++) {
+    const values = [];
+    for (let r = firstDataRow; r <= lastRow; r++) {
+      const t = cellText(ws.getRow(r).getCell(col)).trim();
+      if (t) values.push(t);
+    }
+    if (!values.length) continue;
+    scores[col] = {};
+    for (const [field, test] of Object.entries(tests)) {
+      scores[col][field] = values.filter(test).length / values.length;
+    }
+  }
+
+  // Assign most-distinctive first, one column per field. A phone number also
+  // "looks like" a class if it is short, so order matters.
+  const cols = {};
+  const confidence = {};
+  const taken = new Set();
+
+  for (const field of ['email', 'mobile', 'class', 'name']) {
+    let bestCol = null;
+    let bestScore = 0;
+    for (const [col, sc] of Object.entries(scores)) {
+      if (taken.has(col)) continue;
+      if (sc[field] > bestScore) { bestScore = sc[field]; bestCol = col; }
+    }
+    // Over half the cells have to agree, or we are guessing.
+    if (bestCol && bestScore > 0.5) {
+      cols[field] = Number(bestCol);
+      confidence[field] = Math.round(bestScore * 100);
+      taken.add(bestCol);
+    }
+  }
+  return { cols, confidence };
+}
+
+/** Spreadsheet column letter, for telling the user what we picked. */
+export function colLetter(n) {
+  let out = '';
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    out = String.fromCharCode(65 + r) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
+}
+
 /** Non-empty cells below a column, to tell a real column from an empty duplicate. */
 function filledBelow(ws, col, fromRow) {
   let n = 0;
@@ -111,7 +192,11 @@ function findHeader(ws) {
   return best;
 }
 
-export async function parseSheet(buffer, filename = '') {
+/**
+ * @param override optional {name,email,mobile,class} of 1-based column numbers,
+ *        set by the teacher when the automatic guess got it wrong.
+ */
+export async function parseSheet(buffer, filename = '', override = null) {
   const wb = new ExcelJS.Workbook();
 
   if (/\.csv$/i.test(filename)) {
@@ -147,23 +232,66 @@ export async function parseSheet(buffer, filename = '') {
     if (found && (!picked || found.score > picked.found.score)) picked = { ws, found };
   }
 
-  if (!picked) {
-    throw new Error(
-      'could not find the column headings. The sheet needs a Name column plus Email, '
-      + `Contact Number and Class - within the first ${HEADER_SEARCH_ROWS} rows. `
-      + 'Download the template and fill that in.',
-    );
+  // No recognisable headings anywhere? Fall back to reading the values. A sheet
+  // with no heading row at all, or headings we have never seen, is still usable.
+  let ws;
+  let headerRow;
+  let cols;
+  let how;
+
+  if (picked) {
+    ws = picked.ws;
+    headerRow = picked.found.headerRow;
+    cols = { ...picked.found.cols };
+    how = 'headings';
+  } else {
+    ws = wb.worksheets.reduce((a, b) => (b.rowCount > (a?.rowCount ?? 0) ? b : a), null);
+    if (!ws || ws.rowCount === 0) throw new Error('the file has no rows in it');
+    // There may still be a heading row, just one worded in a way we do not
+    // recognise (or in Malayalam). A heading row contains no email and no phone
+    // number, so if row 1 has neither and a later row does, skip row 1 — it
+    // would otherwise be reported as a student called "Full Name Of Pupil".
+    headerRow = !rowHasRealValues(ws, 1) && rowHasRealValues(ws, 2) ? 1 : 0;
+    cols = {};
+    how = 'contents';
   }
 
-  const { ws, found } = picked;
-  const { headerRow, cols, fields } = found;
+  // Check every mapping against the actual values, and fill in or correct it.
+  // A column headed "Email" that holds phone numbers is trusted less than the
+  // column that actually holds the emails.
+  const inferred = inferColumns(ws, headerRow + 1);
+  const corrected = [];
 
-  // Say this once, up front, instead of repeating "no contact number" against
-  // every single row of an otherwise perfect sheet.
-  const LABEL = { email: 'Email', mobile: 'Contact Number', class: 'Class' };
-  const missing = ['email', 'mobile', 'class'].filter((f) => !fields.includes(f));
+  for (const field of ['name', 'email', 'mobile', 'class']) {
+    const guess = inferred.cols[field];
+    if (cols[field] === undefined) {
+      if (guess) { cols[field] = guess; corrected.push(`${field} read from column ${colLetter(guess)}`); }
+      continue;
+    }
+    // The heading claims this field — but does the column actually hold it?
+    if (guess && guess !== cols[field] && columnScore(ws, cols[field], headerRow + 1, field) < 0.5) {
+      cols[field] = guess;
+      corrected.push(`${field} taken from column ${colLetter(guess)}, which is where the ${field} values actually are`);
+    }
+  }
+
+  // An explicit choice from the teacher always wins.
+  if (override) {
+    for (const field of ['name', 'email', 'mobile', 'class']) {
+      const n = Number(override[field]);
+      if (Number.isInteger(n) && n > 0) cols[field] = n;
+    }
+    how = 'your column choices';
+  }
+
+  const LABEL = { name: 'Name', email: 'Email', mobile: 'Contact Number', class: 'Class' };
+  const missing = ['name', 'email', 'mobile', 'class'].filter((f) => cols[f] === undefined);
   if (missing.length) {
-    throw new Error(`the sheet has no ${missing.map((m) => LABEL[m]).join(' or ')} column, and every student needs one. Download the template and fill that in.`);
+    throw new Error(
+      `could not work out which column holds the ${missing.map((m) => LABEL[m]).join(' and ')}. `
+      + 'Check the sheet has one column each for Name, Email, Contact Number and Class, '
+      + 'or set the columns yourself below.',
+    );
   }
 
   const rows = [];
@@ -198,7 +326,37 @@ export async function parseSheet(buffer, filename = '') {
     columns: Object.keys(cols),
     sheetName: ws.name,
     blankRows: blank,
+    // what was used, so the teacher can see it and correct it if wrong
+    mapping: Object.fromEntries(Object.entries(cols).map(([f, c]) => [f, { column: c, letter: colLetter(c) }])),
+    detectedBy: how,
+    corrections: corrected,
+    confidence: inferred.confidence,
+    sheetNames: wb.worksheets.map((w) => w.name),
   };
+}
+
+/** Does this row contain an actual email or phone number, i.e. is it data? */
+function rowHasRealValues(ws, r) {
+  if (r > ws.rowCount) return false;
+  let found = false;
+  ws.getRow(r).eachCell({ includeEmpty: false }, (cell) => {
+    const t = cellText(cell).trim();
+    if (looksEmail(t) || looksMobile(t)) found = true;
+  });
+  return found;
+}
+
+/** How well one column's values match one field. */
+function columnScore(ws, col, firstDataRow, field) {
+  const tests = { email: looksEmail, mobile: looksMobile, class: looksClass, name: looksName };
+  const last = Math.min(ws.rowCount, firstDataRow + 40);
+  const values = [];
+  for (let r = firstDataRow; r <= last; r++) {
+    const t = cellText(ws.getRow(r).getCell(col)).trim();
+    if (t) values.push(t);
+  }
+  if (!values.length) return 0;
+  return values.filter(tests[field]).length / values.length;
 }
 
 /** The blank sheet schools should fill in. */
