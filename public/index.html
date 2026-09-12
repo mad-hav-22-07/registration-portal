@@ -37,6 +37,21 @@
   .result { margin-top: 20px; padding: 18px; border-radius: 10px; background: #f0fff4; border: 1px solid #9ae6b4; text-align: center; }
   .result .big { font: 700 28px/1.2 ui-monospace, monospace; letter-spacing: 2px; color: #22543d; margin: 8px 0; }
   .err { margin-top: 18px; padding: 11px 13px; border-radius: 8px; background: #fff5f5; color: #c53030; font-size: 14px; }
+
+  .step { margin-top: 22px; padding: 16px; border: 1px solid #dfe3e8; border-radius: 10px; }
+  .step h3 { margin: 0 0 4px; font-size: 15px; }
+  .step .code { font-family: ui-monospace, monospace; font-weight: 700; }
+  a.tmpl { color: #2b6cb0; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  th, td { text-align: left; padding: 5px 7px; border-bottom: 1px solid #eef1f4; }
+  th { font-size: 11px; text-transform: uppercase; color: #7b8794; }
+  td.roll { font-family: ui-monospace, monospace; font-weight: 600; }
+  .bad td { color: #c53030; }
+  .summary { display: flex; gap: 10px; margin-top: 14px; }
+  .summary div { flex: 1; padding: 10px; text-align: center; border-radius: 8px; background: #f7fafc; border: 1px solid #e2e8f0; }
+  .summary b { display: block; font-size: 20px; }
+  .summary small { color: #7b8794; font-size: 11px; }
+  .scroll { max-height: 320px; overflow-y: auto; }
 </style>
 
 <div class="tabs">
@@ -75,6 +90,9 @@
 <form id="formS" hidden>
   <h2>Register your school</h2>
 
+  <small>Register the school first, then upload a sheet with all your students
+  and teachers. They can also register themselves one by one on the other tab.</small>
+
   <label for="district">District</label>
   <select id="district" name="district" required><option value="">Select district</option></select>
 
@@ -94,6 +112,23 @@
   <button class="go" type="submit">Get school code</button>
 </form>
 
+<!-- appears after a school has its code -->
+<div id="bulk" hidden>
+  <div class="step">
+    <h3>Add your students and teachers</h3>
+    <small>School code <span class="code" id="bulkCode"></span> — <span id="bulkName"></span></small>
+
+    <p style="margin:12px 0 4px"><a class="tmpl" href="/api/template.xlsx">⬇ Download the template sheet</a></p>
+    <small>Fill in Name, Email, Mobile Number and Role, then upload it below.</small>
+
+    <form id="formU">
+      <label for="file">Filled-in sheet (.xlsx or .csv)</label>
+      <input type="file" id="file" name="file" accept=".xlsx,.xls,.csv" required>
+      <button class="go" type="submit">Upload and generate roll numbers</button>
+    </form>
+  </div>
+</div>
+
 <div id="out"></div>
 
 <script>
@@ -108,6 +143,7 @@ fetch('/api/districts').then((r) => r.json()).then((list) => {
 const show = (which) => {
   $('formP').hidden = which !== 'P';
   $('formS').hidden = which !== 'S';
+  $('bulk').hidden = true;
   $('tabP').className = which === 'P' ? 'on' : '';
   $('tabS').className = which === 'S' ? 'on' : '';
   $('out').innerHTML = '';
@@ -181,11 +217,98 @@ $('formP').onsubmit = (e) => {
 
 $('formS').onsubmit = (e) => {
   e.preventDefault();
-  submit(e.target, '/api/schools', (d) => `
-    <div class="result">
-      <div>${d.already ? 'This school is already registered. Its code is' : 'Your school code'}</div>
-      <div class="big">${d.code}</div>
-      <small>${d.name}<br>share this code with your students and teachers</small>
-    </div>`);
+  submit(e.target, '/api/schools', (d) => {
+    // keep the code on screen and open the upload step — the school almost
+    // always wants to add its list straight away
+    $('bulkCode').textContent = d.code;
+    $('bulkName').textContent = d.name;
+    $('bulk').hidden = false;
+    return `
+      <div class="result">
+        <div>${d.already ? 'Already registered. Your school code is' : 'Your school code'}</div>
+        <div class="big">${d.code}</div>
+        <small>${d.name}<br>share this code with anyone registering individually</small>
+      </div>`;
+  });
 };
+
+/* ── sheet upload ────────────────────────────────────────────────────────── */
+
+$('formU').onsubmit = async (e) => {
+  e.preventDefault();
+  const code = $('bulkCode').textContent;
+  const btn = e.target.querySelector('button.go');
+  btn.disabled = true;
+  btn.textContent = 'reading the sheet…';
+  $('out').innerHTML = '';
+
+  try {
+    const body = new FormData(e.target);
+    const r = await fetch(`/api/schools/${encodeURIComponent(code)}/upload`, { method: 'POST', body });
+    const d = await r.json();
+
+    if (d.error) {
+      $('out').innerHTML = `<div class="err">${d.error}</div>`;
+    } else {
+      $('out').innerHTML = renderUpload(d);
+      if (d.added.length) wireDownload(d);
+      e.target.reset();
+    }
+  } catch (err) {
+    $('out').innerHTML = `<div class="err">${err.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Upload and generate roll numbers';
+  }
+};
+
+const esc = (v) => String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function renderUpload(d) {
+  const rows = d.added.map((a) => `<tr><td class="roll">${esc(a.roll)}</td><td>${esc(a.name)}</td><td>${esc(a.role)}</td></tr>`).join('');
+  const bad = d.skipped.map((sk) => `<tr class="bad"><td>row ${sk.row}</td><td>${esc(sk.name) || '—'}</td><td>${esc(sk.reason)}</td></tr>`).join('');
+
+  return `
+    <div class="summary">
+      <div><b>${d.added.length}</b><small>roll numbers issued</small></div>
+      <div><b>${d.skipped.length}</b><small>skipped</small></div>
+    </div>
+
+    ${d.added.length ? `
+      <div class="step">
+        <h3>Roll numbers</h3>
+        <button class="go" id="dlcsv" style="margin-top:10px">Download this list (CSV)</button>
+        <div class="scroll">
+          <table><thead><tr><th>Roll</th><th>Name</th><th>Role</th></tr></thead><tbody>${rows}</tbody></table>
+        </div>
+      </div>` : ''}
+
+    ${d.skipped.length ? `
+      <div class="step">
+        <h3>Skipped rows — fix these and upload again</h3>
+        <small>Re-uploading is safe: anyone already issued a roll number is skipped, not duplicated.</small>
+        <div class="scroll">
+          <table><thead><tr><th>Where</th><th>Name</th><th>Why</th></tr></thead><tbody>${bad}</tbody></table>
+        </div>
+      </div>` : ''}`;
+}
+
+// Built from the JSON already in the page, so no second request and no endpoint
+// that would hand out a school's list to anyone who guesses the code.
+function wireDownload(d) {
+  $('dlcsv').onclick = () => {
+    const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const csv = [
+      ['Roll Number', 'Name', 'Email', 'Mobile Number', 'Role', 'School Code', 'School Name'].join(','),
+      ...d.added.map((a) => [a.roll, a.name, a.email, a.mobile, a.role, d.schoolCode, d.schoolName].map(q).join(',')),
+    ].join('\r\n');
+
+    const url = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `roll-numbers-${d.schoolCode}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+}
 </script>

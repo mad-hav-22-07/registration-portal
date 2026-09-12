@@ -1,8 +1,12 @@
 # Registration Portal
 
-Schools register and get a **School Code**. Students and teachers register with
-that code and get a **Roll Number**. You download everything as an Excel file
-with two sheets.
+Two ways in:
+
+- **A school registers** → gets a **School Code** → uploads an Excel sheet of
+  all its students and teachers → every row gets a **Roll Number**
+- **An individual registers** → enters their school's code → gets a Roll Number
+
+You download everything as an Excel file with two sheets.
 
 ## Run it
 
@@ -48,6 +52,31 @@ Two properties worth knowing:
   code back, not a second row, because the school name is normalized first
   (`St. Thomas H.S.S` and `st thomas hss` hash to the same slot). A participant
   who registers twice is told their existing roll number.
+
+## The sheet a school uploads
+
+They download the template from the portal (`/api/template.xlsx`): **Name,
+Email, Mobile Number, Role**. Role is `student` or `teacher`, blank means
+student.
+
+Real sheets never look like the template, so the parser is deliberately loose:
+
+- **Columns are matched by meaning, in any order.** `Student Name`, `Full Name`,
+  `Name of Participant` all map to name; `Phone Number`, `Contact No`,
+  `WhatsApp` all map to mobile; `E-Mail ID`, `Mail` to email; `Category`,
+  `Type`, `Designation` to role.
+- **A title block above the headers is fine** — the header row is searched for
+  in the first 20 rows.
+- **Phone numbers survive Excel's meddling** — cells that became numbers,
+  `98765 00002`, and `+91 9876500003` all normalize to 10 digits.
+- **Blank spacer rows are skipped**, emails are lowercased.
+- **One bad row does not reject the file.** Valid rows are registered; the rest
+  come back with the real spreadsheet row number and the reason, so they can be
+  fixed and the sheet uploaded again.
+- **Re-uploading is safe.** Anyone who already has a roll number is reported as
+  already registered rather than issued a second one.
+
+CSV works too.
 
 ## The Excel file
 

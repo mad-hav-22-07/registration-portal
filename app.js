@@ -2,7 +2,9 @@ import dotenv from 'dotenv';
 import express from 'express';
 import pg from 'pg';
 import ExcelJS from 'exceljs';
+import multer from 'multer';
 import { DISTRICTS, rollProbe, schoolProbe, normalize, claim } from './codes.js';
+import { parseSheet, buildTemplate } from './sheet.js';
 
 // `vercel env pull` writes .env.local, so read that first and fall back to .env.
 // Earlier entries win, which keeps hand-written values in .env from being lost.
@@ -61,6 +63,17 @@ const app = express();
 app.use(express.json());
 app.use(express.static('public'));
 
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
+
+/** Blank sheet for schools to fill in, so the columns come back as expected. */
+app.get('/api/template.xlsx', async (req, res) => {
+  const wb = await buildTemplate();
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="participants-template.xlsx"');
+  await wb.xlsx.write(res);
+  res.end();
+});
+
 // Sent as a sorted array, not the object: JS orders integer-like keys first, so
 // a plain object would put 10-14 above 01-09 in the dropdown.
 app.get('/api/districts', (req, res) =>
@@ -115,6 +128,68 @@ app.post('/api/schools', async (req, res) => {
   }
 });
 
+/* ── school uploads a sheet of its participants ──────────────────────────── */
+
+/** Register one participant under a school. Shared by the form and the upload. */
+async function addParticipant({ schoolCode, district, role, name, email, mobile }) {
+  return claim(
+    rollProbe(district, email),
+    (c) => pool.query(
+      `INSERT INTO participants (roll, school_code, role, name, email, mobile)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING roll`,
+      [c, schoolCode, role, name, email, mobile],
+    ),
+    'participants_pkey',
+  );
+}
+
+app.post('/api/schools/:code/upload', upload.single('file'), async (req, res) => {
+  try {
+    const schoolCode = clean(req.params.code, 10).toUpperCase();
+    const school = await pool.query('SELECT code, district, name FROM schools WHERE code=$1', [schoolCode]);
+    if (!school.rows.length) throw new Error('that school code does not exist');
+    if (!req.file) throw new Error('attach the filled-in Excel sheet');
+
+    const { rows, columns } = await parseSheet(req.file.buffer, req.file.originalname);
+    if (!rows.length) throw new Error('the sheet has headings but no rows below them');
+
+    const district = school.rows[0].district;
+    const added = [];
+    const skipped = [];
+    const seen = new Set(); // the same person listed twice in one sheet
+
+    for (const r of rows) {
+      const name = clean(r.name, 100);
+      const email = clean(r.email, 150).toLowerCase();
+      const mob = mobile10(r.mobile);
+
+      if (name.length < 2) { skipped.push({ ...r, reason: 'no name' }); continue; }
+      if (!isEmail(email)) { skipped.push({ ...r, reason: email ? `"${email}" is not a valid email` : 'no email' }); continue; }
+      if (!mob) { skipped.push({ ...r, reason: r.mobile ? `"${r.mobile}" is not a valid 10-digit mobile` : 'no mobile number' }); continue; }
+      if (seen.has(email)) { skipped.push({ ...r, reason: 'listed twice in this sheet' }); continue; }
+      seen.add(email);
+
+      try {
+        const { code: roll } = await addParticipant({ schoolCode, district, role: r.role, name, email, mobile: mob });
+        added.push({ row: r.row, name, email, mobile: mob, role: r.role, roll });
+      } catch (e) {
+        if (e.constraint === 'participants_email_unique') {
+          const { rows: ex } = await pool.query('SELECT roll FROM participants WHERE email=$1', [email]);
+          skipped.push({ ...r, reason: `already registered${ex.length ? ` as ${ex[0].roll}` : ''}` });
+        } else {
+          skipped.push({ ...r, reason: e.message });
+        }
+      }
+    }
+
+    console.log(`upload for ${schoolCode}: ${added.length} added, ${skipped.length} skipped`);
+    res.json({ schoolCode, schoolName: school.rows[0].name, columnsFound: columns, added, skipped });
+  } catch (e) {
+    console.error('upload failed:', e.message);
+    res.status(400).json({ error: e.message });
+  }
+});
+
 /** Look up a school by code so the participant form can confirm the name. */
 app.get('/api/schools/:code', async (req, res) => {
   const { rows } = await pool.query('SELECT code, name, district FROM schools WHERE code=$1', [clean(req.params.code, 10).toUpperCase()]);
@@ -143,15 +218,9 @@ app.post('/api/participants', async (req, res) => {
     if (!mob) throw new Error('enter a valid 10-digit mobile number');
 
     const district = school.rows[0].district;
-    const { code: roll, attempts } = await claim(
-      rollProbe(district, email),
-      (c) => pool.query(
-        `INSERT INTO participants (roll, school_code, role, name, email, mobile)
-         VALUES ($1,$2,$3,$4,$5,$6) RETURNING roll`,
-        [c, schoolCode, role, name, email, mob],
-      ),
-      'participants_pkey',
-    );
+    const { code: roll, attempts } = await addParticipant({
+      schoolCode, district, role, name, email, mobile: mob,
+    });
 
     console.log(`${role} ${roll} — ${name} (${attempts} probe${attempts > 1 ? 's' : ''})`);
     res.json({ roll, name, school: school.rows[0].name, district: DISTRICTS[district] });
