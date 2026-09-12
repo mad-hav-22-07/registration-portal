@@ -5,7 +5,7 @@ import ExcelJS from 'exceljs';
 import multer from 'multer';
 import {
   DISTRICTS, CLASSES, parseClass, normalize, claim,
-  schoolProbe, schoolStudentProbe, individualProbe,
+  schoolProbe, schoolStudentProbe, individualProbe, MAX_PROBES,
 } from './codes.js';
 import { parseSheet, buildTemplate } from './sheet.js';
 
@@ -37,10 +37,10 @@ async function setup() {
       roll        TEXT PRIMARY KEY,
       class       TEXT NOT NULL,
       name        TEXT NOT NULL,
+      name_key    TEXT NOT NULL DEFAULT '',
       email       TEXT NOT NULL,
       mobile      TEXT NOT NULL,
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-      CONSTRAINT individuals_email_unique UNIQUE (email)
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
     CREATE TABLE IF NOT EXISTS schools (
@@ -62,16 +62,39 @@ async function setup() {
       school_code TEXT NOT NULL REFERENCES schools(code),
       class       TEXT NOT NULL,
       name        TEXT NOT NULL,
+      name_key    TEXT NOT NULL DEFAULT '',
       email       TEXT NOT NULL,
       mobile      TEXT NOT NULL,
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-      CONSTRAINT school_students_email_unique UNIQUE (email)
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
     -- Postgres does not index a referencing column automatically, and both the
     -- school lookup and the export count students per school.
     CREATE INDEX IF NOT EXISTS school_students_by_school ON school_students (school_code);
+
+    -- Identity is the person, not the mailbox. Siblings on a parent's address
+    -- and a school using one office address are both completely normal here; a
+    -- UNIQUE(email) meant the second child could never register, and was told
+    -- "listed twice in this sheet" as if they were a typo.
+    ALTER TABLE individuals     ADD COLUMN IF NOT EXISTS name_key TEXT NOT NULL DEFAULT '';
+    ALTER TABLE school_students ADD COLUMN IF NOT EXISTS name_key TEXT NOT NULL DEFAULT '';
+    ALTER TABLE individuals     DROP CONSTRAINT IF EXISTS individuals_email_unique;
+    ALTER TABLE school_students DROP CONSTRAINT IF EXISTS school_students_email_unique;
+    CREATE UNIQUE INDEX IF NOT EXISTS individuals_person     ON individuals (email, name_key);
+    CREATE UNIQUE INDEX IF NOT EXISTS school_students_person ON school_students (email, name_key);
+    CREATE INDEX IF NOT EXISTS school_students_by_email ON school_students (email);
+    CREATE INDEX IF NOT EXISTS individuals_by_email     ON individuals (email);
   `);
+
+  // Backfill name_key for any rows written before the column existed, or the
+  // new unique index would treat them all as the same person.
+  for (const table of ['individuals', 'school_students']) {
+    const stale = await pool.query(`SELECT roll, name FROM ${table} WHERE name_key = ''`);
+    for (const r of stale.rows) {
+      await pool.query(`UPDATE ${table} SET name_key=$2 WHERE roll=$1`, [r.roll, normalize(r.name)]);
+    }
+    if (stale.rowCount) console.log(`backfilled name_key for ${stale.rowCount} ${table} rows`);
+  }
   console.log('database ready');
 }
 
@@ -186,12 +209,20 @@ function rateLimit({ max, windowMs, message }) {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     const slot = hits.get(ip);
 
-    if (!slot || now > slot.resetAt) {
-      hits.set(ip, { n: 1, resetAt: now + windowMs });
-    } else if (++slot.n > max) {
+    if (slot && now <= slot.resetAt && slot.n >= max) {
       res.setHeader('Retry-After', Math.ceil((slot.resetAt - now) / 1000));
       return res.status(429).json({ error: message });
     }
+
+    // Count only what succeeded. A whole computer lab shares one IP, and
+    // rejected attempts used to eat the budget — so a student who mistyped their
+    // phone number burned the allowance for the next student on that machine.
+    res.on('finish', () => {
+      if (res.statusCode >= 400) return;
+      const cur = hits.get(ip);
+      if (!cur || Date.now() > cur.resetAt) hits.set(ip, { n: 1, resetAt: Date.now() + windowMs });
+      else cur.n++;
+    });
 
     // Cheap sweep so the map cannot grow without bound.
     if (hits.size > 5000) {
@@ -209,7 +240,9 @@ const readLimit = rateLimit({
   message: 'too many requests — wait a minute and try again',
 });
 const writeLimit = rateLimit({
-  max: 20, windowMs: 60_000,
+  // A school computer lab or a CGNAT mobile carrier is one IP, so this has to
+  // clear a whole classroom registering together.
+  max: 120, windowMs: 60_000,
   message: 'too many registration attempts — wait a minute and try again',
 });
 const uploadLimit = rateLimit({
@@ -241,27 +274,36 @@ app.post('/api/individuals', writeLimit, route(async (req, res) => {
     const mob = mobile10(req.body.mobile);
     if (!mob) throw bad('enter a valid 10-digit contact number');
 
+    const nameKey = normalize(name);
+
+    // Ask first, rather than letting a duplicate insert fail: node-postgres
+    // destroys a client that threw, and the next query then pays a ~2.6s
+    // reconnect.
+    const already = await pool.query(
+      'SELECT roll FROM individuals WHERE email=$1 AND name_key=$2', [email, nameKey],
+    );
+    if (already.rows.length) {
+      return res.status(409).json({
+        error: `you are already registered - your roll number is ${already.rows[0].roll}`,
+        roll: already.rows[0].roll,
+      });
+    }
+
     const { code: roll, attempts } = await claim(
       individualProbe(cls, email),
-      (c) => pool.query(
-        'INSERT INTO individuals (roll, class, name, email, mobile) VALUES ($1,$2,$3,$4,$5)',
-        [c, cls, name, email, mob],
-      ),
-      'individuals_pkey',
+      async (c) => {
+        const r = await pool.query(
+          `INSERT INTO individuals (roll, class, name, name_key, email, mobile)
+           VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (roll) DO NOTHING`,
+          [c, cls, name, nameKey, email, mob],
+        );
+        return r.rowCount === 1;
+      },
     );
 
     console.log(`individual ${roll} - ${name}, class ${Number(cls)} (${attempts} probe${attempts > 1 ? 's' : ''})`);
     res.json({ roll, name, class: Number(cls) });
   } catch (e) {
-    if (e.constraint === 'individuals_email_unique') {
-      // Looking up their existing roll is a courtesy; if that query also fails we
-      // still owe them the 409 rather than a hung request.
-      const existing = await pool
-        .query('SELECT roll FROM individuals WHERE email=$1', [clean(req.body.email, 254).toLowerCase()])
-        .then((r) => r.rows[0]?.roll)
-        .catch(() => null);
-      return res.status(409).json({ error: `that email is already registered${existing ? ` - your roll number is ${existing}` : ''}` });
-    }
     if (!e.badInput) throw e; // a DB failure is not the student's fault
     res.status(400).json({ error: e.message });
   }
@@ -392,7 +434,7 @@ app.post('/api/schools/:code/upload', uploadLimit, upload.single('file'), route(
     // A 5-character code is guessable inside a 17,576-code district space, and
     // roll numbers are permanent once issued — so prove you are the school by
     // also giving the email or contact number it was registered with.
-    const who = clean(req.body.email, 150).toLowerCase();
+    const who = clean(req.body.email, 254).toLowerCase();
     const whoMobile = mobile10(req.body.email);
     const row = school.rows[0];
     if (who !== row.email && whoMobile !== row.poc_mobile) {
@@ -428,8 +470,10 @@ app.post('/api/schools/:code/upload', uploadLimit, upload.single('file'), route(
     const district = school.rows[0].district;
     const added = [];
     const skipped = [];
-    const seen = new Set(); // the same student listed twice in one sheet
 
+    // Validate everything first, so the slow part only touches good rows.
+    const candidates = [];
+    const seen = new Set(); // same person listed twice in one sheet
     for (const r of rows) {
       const name = clean(r.name, 300);
       const email = clean(r.email, 300).toLowerCase();
@@ -440,34 +484,100 @@ app.post('/api/schools/:code/upload', uploadLimit, upload.single('file'), route(
       // Report over-length rather than trimming: a sliced email is a different,
       // non-existent address and that student would never be contacted.
       if (name.length > 100) { skipped.push({ ...r, reason: 'name is longer than 100 characters' }); continue; }
-      if (email.length > 254) { skipped.push({ ...r, reason: 'email is too long' }); continue; }
       if (!isEmail(email)) { skipped.push({ ...r, reason: email ? `"${email}" is not a valid email` : 'no email' }); continue; }
+      if (email.length > 254) { skipped.push({ ...r, reason: 'email is too long' }); continue; }
       if (!mob) { skipped.push({ ...r, reason: r.mobile ? `"${r.mobile}" is not a valid 10-digit number` : 'no contact number' }); continue; }
       if (!cls) { skipped.push({ ...r, reason: r.class ? `class "${r.class}" is not 8, 9 or 10` : 'no class' }); continue; }
-      if (seen.has(email)) { skipped.push({ ...r, reason: 'listed twice in this sheet' }); continue; }
-      seen.add(email);
 
-      try {
-        const { code: roll } = await claim(
-          schoolStudentProbe(district, cls, email),
-          (c) => pool.query(
-            'INSERT INTO school_students (roll, school_code, class, name, email, mobile) VALUES ($1,$2,$3,$4,$5,$6)',
-            [c, schoolCode, cls, name, email, mob],
-          ),
-          'school_students_pkey',
-        );
-        added.push({ row: r.row, name, email, mobile: mob, class: Number(cls), roll });
-      } catch (e) {
-        if (e.constraint === 'school_students_email_unique') {
-          const existing = await pool
-            .query('SELECT roll FROM school_students WHERE email=$1', [email])
-            .then((q) => q.rows[0]?.roll)
-            .catch(() => null);
-          skipped.push({ ...r, reason: `already has a roll number${existing ? ` - ${existing}` : ''}` });
-        } else {
-          skipped.push({ ...r, reason: e.message });
+      const nameKey = normalize(name);
+      // Identity is the person, not the mailbox - siblings share a parent's
+      // address, so only the same NAME on the same address is a duplicate row.
+      const who = `${email}|${nameKey}`;
+      if (seen.has(who)) { skipped.push({ ...r, reason: 'this same student is listed twice in the sheet' }); continue; }
+      seen.add(who);
+
+      candidates.push({ ...r, name, email, mobile: mob, class: cls, nameKey });
+    }
+
+    // One round trip to find everyone already registered, instead of one failed
+    // insert per student. Each failed insert destroyed a pooled connection and
+    // cost the NEXT query a ~2.6s reconnect, so a 40-student re-upload took
+    // over three minutes.
+    const emails = [...new Set(candidates.map((c) => c.email))];
+    const priorRows = emails.length
+      ? (await pool.query(
+          `SELECT s.email, s.name_key, s.roll, s.school_code, sc.name AS school_name
+             FROM school_students s JOIN schools sc ON sc.code = s.school_code
+            WHERE s.email = ANY($1)`, [emails])).rows
+      : [];
+    const prior = new Map(priorRows.map((r) => [`${r.email}|${r.name_key}`, r]));
+
+    const toInsert = [];
+    for (const c of candidates) {
+      const existing = prior.get(`${c.email}|${c.nameKey}`);
+      if (!existing) { toInsert.push(c); continue; }
+      if (existing.school_code !== schoolCode) {
+        // Do not hand another school's roll number to whoever uploads a sheet
+        // containing that address, and do not let them believe the student is
+        // on their own roster.
+        skipped.push({ ...c, reason: 'already registered by another school - contact the organisers' });
+      } else {
+        skipped.push({ ...c, reason: `already has a roll number - ${existing.roll}`, roll: existing.roll });
+      }
+    }
+
+    /**
+     * Insert in batches rather than one row per round trip.
+     *
+     * Each student needs a code nobody else has, and almost every one lands on
+     * its first candidate. So: give every remaining student its next candidate,
+     * insert the whole lot in a single statement with ON CONFLICT (roll) DO
+     * NOTHING, and see which came back. Whoever lost a race tries again on the
+     * next pass. 40 students went from 40 sequential round trips (13s) to two.
+     */
+    for (const c of toInsert) c.probe = schoolStudentProbe(district, c.class, c.email);
+    let pending = toInsert;
+
+    for (let pass = 0; pass < MAX_PROBES && pending.length; pass++) {
+      const batch = [];
+      const usedThisPass = new Set();
+      const deferred = [];
+
+      for (const c of pending) {
+        const next = c.probe.next();
+        if (next.done) { skipped.push({ ...c, reason: 'no codes left for this district and class' }); continue; }
+        // Two students can want the same code; one per statement, rest next pass.
+        if (usedThisPass.has(next.value)) { deferred.push(c); continue; }
+        usedThisPass.add(next.value);
+        c.roll = next.value;
+        batch.push(c);
+      }
+
+      if (batch.length) {
+        const cols = 7;
+        const values = batch.map((_, i) =>
+          `(${Array.from({ length: cols }, (_, k) => `$${i * cols + k + 1}`).join(',')})`).join(',');
+        const params = batch.flatMap((c) => [c.roll, schoolCode, c.class, c.name, c.nameKey, c.email, c.mobile]);
+
+        const res2 = await pool.query(
+          `INSERT INTO school_students (roll, school_code, class, name, name_key, email, mobile)
+           VALUES ${values} ON CONFLICT (roll) DO NOTHING RETURNING roll`, params);
+
+        const landed = new Set(res2.rows.map((r) => r.roll));
+        for (const c of batch) {
+          if (landed.has(c.roll)) {
+            added.push({ row: c.row, name: c.name, email: c.email, mobile: c.mobile, class: Number(c.class), roll: c.roll });
+          } else {
+            deferred.push(c); // somebody else holds that code; probe on
+          }
         }
       }
+
+      pending = deferred;
+    }
+
+    for (const c of pending) {
+      skipped.push({ ...c, reason: `could not allocate a code after ${MAX_PROBES} attempts - tell the organisers` });
     }
 
     console.log(`upload for ${schoolCode}: ${added.length} added, ${skipped.length} skipped of ${rows.length} rows`);
@@ -484,6 +594,36 @@ app.post('/api/schools/:code/upload', uploadLimit, upload.single('file'), route(
     console.error('upload rejected:', e.message);
     res.status(400).json({ error: e.message });
   }
+}));
+
+/**
+ * A school's own student list.
+ *
+ * An upload commits each row as it goes, and the roll numbers only existed in
+ * the HTTP response — so a dropped connection or a timeout left a school
+ * permanently unable to find out what its students were given. Behind the same
+ * email-or-number confirmation the upload requires.
+ */
+app.post('/api/schools/:code/students', readLimit, route(async (req, res) => {
+  const schoolCode = clean(req.params.code, 10).toUpperCase();
+  const school = await pool.query('SELECT code, name, email, poc_mobile FROM schools WHERE code=$1', [schoolCode]);
+  if (!school.rows.length) return res.status(404).json({ error: 'no school with that code' });
+
+  const who = clean(req.body?.email, 254).toLowerCase();
+  const whoMobile = mobile10(req.body?.email);
+  const row = school.rows[0];
+  if (who !== row.email && whoMobile !== row.poc_mobile) {
+    return res.status(403).json({ error: 'the email or contact number does not match the one this school registered with' });
+  }
+
+  const students = await pool.query(
+    `SELECT roll, name, email, mobile, class FROM school_students
+      WHERE school_code=$1 ORDER BY class, roll`, [schoolCode]);
+
+  res.json({
+    schoolCode, schoolName: row.name,
+    students: students.rows.map((r) => ({ ...r, class: Number(r.class) })),
+  });
 }));
 
 /* -- admin: counts + Excel export ------------------------------------------ */
@@ -536,7 +676,15 @@ app.get('/api/export.xlsx', route(async (req, res) => {
     if (mobCol >= 0) ws.getColumn(mobCol + 1).numFmt = '@';
   };
 
-  const when = (r) => ({ ...r, registered_at: new Date(r.created_at).toISOString().slice(0, 16).replace('T', ' ') });
+  // Local time, and labelled. A 15:30 IST registration read as 10:00 before,
+  // in the very column organisers use to settle tie-breaks.
+  const when = (r) => ({
+    ...r,
+    registered_at: new Date(r.created_at).toLocaleString('en-GB', {
+      timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    }).replace(',', ''),
+  });
 
   sheet('Individuals', [
     { header: 'Roll Number', key: 'roll', width: 14 },
@@ -544,7 +692,7 @@ app.get('/api/export.xlsx', route(async (req, res) => {
     { header: 'Email', key: 'email', width: 30 },
     { header: 'Contact Number', key: 'mobile', width: 16 },
     { header: 'Class', key: 'class_n', width: 8 },
-    { header: 'Registered At', key: 'registered_at', width: 18 },
+    { header: 'Registered At (IST)', key: 'registered_at', width: 20 },
   ], individuals.rows.map((r) => ({ ...when(r), class_n: Number(r.class) })));
 
   sheet('School Students', [
@@ -556,7 +704,7 @@ app.get('/api/export.xlsx', route(async (req, res) => {
     { header: 'School Code', key: 'school_code', width: 13 },
     { header: 'School Name', key: 'school_name', width: 32 },
     { header: 'District', key: 'district_name', width: 20 },
-    { header: 'Registered At', key: 'registered_at', width: 18 },
+    { header: 'Registered At (IST)', key: 'registered_at', width: 20 },
   ], students.rows.map((r) => ({ ...when(r), class_n: Number(r.class), district_name: DISTRICTS[r.district] })));
 
   sheet('Schools', [

@@ -136,27 +136,34 @@ export const schoolStudentProbe = (district, classPadded, email) => probe(distri
 export const individualProbe = (classPadded, email) => probe('IN' + classPadded, email);
 
 /**
+ * Give up after this many probes rather than walking all 17,576 slots. At one
+ * round trip each that would be nearly a minute of database time before the
+ * caller saw any error at all.
+ */
+export const MAX_PROBES = 60;
+
+/**
  * Claim the first free code in the probe sequence.
  *
- * The insert itself is the claim. A unique-violation on the code column means
- * somebody else took that slot, so move to the next one; any other error is
- * real and must not be swallowed.
+ * `tryInsert(code)` must return true when the row landed and false when that
+ * code was already taken — and it must do so WITHOUT raising. node-postgres
+ * releases a client together with any error it threw, which destroys the
+ * connection, so the next query pays a fresh TLS handshake: measured at 2.6s
+ * against Neon. Using failed inserts as the probe mechanism therefore cost
+ * ~5.5s per already-registered student, and re-uploading a corrected
+ * 40-student sheet took over three minutes.
+ *
+ * `INSERT ... ON CONFLICT (pk) DO NOTHING RETURNING ...` gives the same answer
+ * with no error and no connection churn.
  */
-export async function claim(probeSeq, insert, codeConstraint) {
+export async function claim(probeSeq, tryInsert) {
   let attempts = 0;
   for (const code of probeSeq) {
     attempts++;
-    try {
-      await insert(code);
-      return { code, attempts };
-    } catch (e) {
-      // Only a violation of THIS code's own constraint means the slot is taken.
-      // A /pkey/ pattern match would also swallow a 23505 from any other table,
-      // turning an unrelated bug into 17,576 pointless retries.
-      const tookThatSlot = e?.code === '23505' && !!codeConstraint && e.constraint === codeConstraint;
-      if (tookThatSlot) continue;
-      throw e;
+    if (await tryInsert(code)) return { code, attempts };
+    if (attempts >= MAX_PROBES) {
+      throw new Error(`could not allocate a code after ${MAX_PROBES} attempts — this district and class is nearly full, tell the organisers`);
     }
   }
-  throw new Error('no codes left for this prefix');
+  throw new Error('no codes left for this district and class');
 }

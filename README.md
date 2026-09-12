@@ -52,6 +52,12 @@ Two properties worth knowing:
   registering in the same millisecond cannot be given the same code.
 - **Re-registering is safe.** A school that registers twice gets its original
   code back. A person who registers twice is told their existing roll number.
+- **Identity is the person, not the mailbox.** Siblings on a parent's address
+  both register; only the same name on the same address is a duplicate.
+- **Codes are allocated without failed inserts.** `ON CONFLICT (roll) DO NOTHING`
+  in batches, because node-postgres destroys a client that threw and the next
+  query then pays a ~2.6s reconnect. Re-uploading a 500-student sheet went from
+  about 46 minutes to 1.5 seconds.
 
 ## The sheet a school uploads
 

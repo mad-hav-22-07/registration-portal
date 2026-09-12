@@ -55,6 +55,10 @@
     <p style="margin:10px 0 4px"><a class="tmpl" href="/api/template.xlsx">⬇ Download the template sheet</a></p>
     <small>Columns: <b>Name, Email, Contact Number, Class</b>. Class must be 8, 9 or 10.</small>
 
+    <p style="margin:0 0 10px">
+      <a href="#" id="getlist" style="color:#2b6cb0;font-size:13px">Already uploaded? Get my students and their roll numbers</a>
+    </p>
+
     <form id="formU">
       <label for="confirm">Your email or contact number</label>
       <input id="confirm" name="email" autocomplete="off" required>
@@ -199,7 +203,9 @@ $('formU').onsubmit = async (e) => {
       $('out').innerHTML = `<div class="err">${esc(d.error)}</div>`;
     } else {
       $('out').innerHTML = renderUpload(d);
-      if (d.added.length) wireDownload(d);
+      // already-registered students carry their roll, so include them
+      const full = [...d.added, ...d.skipped.filter((s) => s.roll)];
+      if (full.length) wireDownload({ ...d, added: full });
       e.target.reset();
     }
   } catch (err) {
@@ -207,6 +213,40 @@ $('formU').onsubmit = async (e) => {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Upload and generate roll numbers';
+  }
+};
+
+/** Recover the list after an upload whose response never arrived. */
+$('getlist').onclick = async (ev) => {
+  ev.preventDefault();
+  const who = $('confirm').value.trim();
+  if (!who) {
+    $('out').innerHTML = '<div class="err">Enter the email or contact number this school registered with first.</div>';
+    return;
+  }
+  $('out').innerHTML = '';
+  try {
+    const r = await fetch(`/api/schools/${encodeURIComponent($('bulkCode').textContent)}/students`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: who }),
+    });
+    const d = await safeJson(r);
+    if (d.error) { $('out').innerHTML = `<div class="err">${esc(d.error)}</div>`; return; }
+    if (!d.students.length) { $('out').innerHTML = '<div class="err">No students uploaded for this school yet.</div>'; return; }
+
+    const rows = d.students.map((a) => `<tr><td class="roll">${esc(a.roll)}</td><td>${esc(a.name)}</td><td>${a.class}</td></tr>`).join('');
+    $('out').innerHTML = `
+      <div class="step">
+        <h3>${d.students.length} student(s) registered</h3>
+        <button class="go" id="dlcsv">Download this list (CSV)</button>
+        <div class="scroll"><table>
+          <thead><tr><th>Roll</th><th>Name</th><th>Class</th></tr></thead><tbody>${rows}</tbody>
+        </table></div>
+      </div>`;
+    wireDownload({ added: d.students, schoolCode: d.schoolCode, schoolName: d.schoolName });
+  } catch (err) {
+    $('out').innerHTML = `<div class="err">${esc(err.message)}</div>`;
   }
 };
 
@@ -221,10 +261,11 @@ function renderUpload(d) {
       <div><b>${d.added.length}</b><small>roll numbers issued</small></div>
       <div><b>${d.skipped.length}</b><small>skipped</small></div>
     </div>
-    ${d.added.length ? `
+    ${(d.added.length || d.skipped.some((s) => s.roll)) ? `
       <div class="step">
         <h3>Roll numbers</h3>
         <button class="go" id="dlcsv">Download this list (CSV)</button>
+        <small>Includes students who already had a roll number, so this is your full list.</small>
         <div class="scroll"><table>
           <thead><tr><th>Roll</th><th>Name</th><th>Class</th></tr></thead><tbody>${rows}</tbody>
         </table></div>
