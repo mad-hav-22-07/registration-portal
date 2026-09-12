@@ -50,9 +50,9 @@ $('load').onclick = async () => {
   }
 
   $('counts').innerHTML = `
+    <div><b>${d.individuals}</b><small>individuals</small></div>
     <div><b>${d.schools}</b><small>schools</small></div>
-    <div><b>${d.students}</b><small>students</small></div>
-    <div><b>${d.teachers}</b><small>teachers</small></div>`;
+    <div><b>${d.schoolStudents}</b><small>school students</small></div>`;
   $('out').innerHTML = `<button id="dl">Download Excel</button>`;
 
   // the key has to ride in the URL here: a browser download is a plain

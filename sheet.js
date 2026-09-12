@@ -1,7 +1,7 @@
 import ExcelJS from 'exceljs';
 
 /**
- * Reading the sheet a school sends you.
+ * Reading the student sheet a school sends you.
  *
  * Real sheets are messy: columns in any order, headers worded differently,
  * a title row above the headers, blank rows in the middle, phone numbers that
@@ -14,7 +14,7 @@ const ALIASES = {
   name: ['name', 'fullname', 'studentname', 'participantname', 'teachername', 'nameofstudent', 'nameoftheparticipant'],
   email: ['email', 'emailid', 'emailaddress', 'mail', 'mailid', 'gmail'],
   mobile: ['mobile', 'mobilenumber', 'mobileno', 'phone', 'phonenumber', 'phoneno', 'contact', 'contactnumber', 'contactno', 'whatsapp', 'whatsappnumber'],
-  role: ['role', 'type', 'category', 'studentorteacher', 'designation'],
+  class: ['class', 'std', 'standard', 'grade', 'classstd', 'studyingin', 'classgrade'],
 };
 
 const squash = (v) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -45,7 +45,8 @@ function findHeader(ws) {
         if (map[field] === undefined && names.includes(key)) map[field] = col;
       }
     });
-    // name + one way to contact them is the minimum we can work with
+    // name + one way to contact them is the minimum worth reading; a missing
+    // class column is reported per row rather than rejecting the whole file
     if (map.name !== undefined && (map.email !== undefined || map.mobile !== undefined)) {
       return { headerRow: r, cols: map };
     }
@@ -68,7 +69,7 @@ export async function parseSheet(buffer, filename = '') {
 
   const found = findHeader(ws);
   if (!found) {
-    throw new Error('could not find the column headings — the sheet needs a "Name" column plus "Email" and/or "Mobile Number". Download the template and use that.');
+    throw new Error('could not find the column headings. The sheet needs Name, Email, Contact Number and Class columns. Download the template and fill that in.');
   }
 
   const { headerRow, cols } = found;
@@ -81,7 +82,7 @@ export async function parseSheet(buffer, filename = '') {
     const name = get('name');
     const email = get('email');
     const mobile = get('mobile');
-    const role = get('role');
+    const cls = get('class');
 
     if (!name && !email && !mobile) continue; // blank spacer row
 
@@ -90,7 +91,7 @@ export async function parseSheet(buffer, filename = '') {
       name,
       email: email.toLowerCase(),
       mobile,
-      role: /teach|staff|faculty/i.test(role) ? 'teacher' : 'student',
+      class: cls,
     });
   }
 
@@ -105,15 +106,16 @@ export async function buildTemplate() {
   ws.columns = [
     { header: 'Name', key: 'name', width: 28 },
     { header: 'Email', key: 'email', width: 32 },
-    { header: 'Mobile Number', key: 'mobile', width: 18 },
-    { header: 'Role', key: 'role', width: 12 },
+    { header: 'Contact Number', key: 'mobile', width: 18 },
+    { header: 'Class', key: 'class', width: 10 },
   ];
   ws.getRow(1).font = { bold: true };
   ws.views = [{ state: 'frozen', ySplit: 1 }];
 
   ws.addRows([
-    { name: 'Arjun Nair', email: 'arjun@example.com', mobile: '9876543210', role: 'student' },
-    { name: 'Jose Thomas', email: 'jose@example.com', mobile: '9876543211', role: 'teacher' },
+    { name: 'Arjun Nair', email: 'arjun@example.com', mobile: '9876543210', class: 10 },
+    { name: 'Deepa Raj', email: 'deepa@example.com', mobile: '9876543211', class: 9 },
+    { name: 'Fathima S', email: 'fathima@example.com', mobile: '9876543212', class: 8 },
   ]);
 
   // Mobile numbers must stay text, or Excel eats a leading zero and turns long
@@ -121,7 +123,7 @@ export async function buildTemplate() {
   ws.getColumn('mobile').numFmt = '@';
 
   const note = ws.getCell('F2');
-  note.value = 'Replace the two example rows with your own list. Role is "student" or "teacher" (defaults to student if left blank). Do not rename the headings.';
+  note.value = 'Replace the example rows with your students. Class must be 8, 9 or 10 and is required for every student. Do not rename the headings.';
   note.font = { italic: true, size: 10 };
   note.alignment = { wrapText: true };
   ws.getColumn('F').width = 60;

@@ -1,0 +1,198 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>School Registration</title>
+<link rel="stylesheet" href="/shared.css">
+
+<h1>School Registration</h1>
+<p class="sub">Registering just yourself? <a href="/">Individual registration</a></p>
+
+<!-- Step 1: register the school, OR come back with a code you already have -->
+<div id="stage1">
+  <form id="formS">
+    <label for="district">District</label>
+    <select id="district" name="district" required><option value="">Select district</option></select>
+
+    <label for="sname">School name</label>
+    <input id="sname" name="name" required>
+    <small>full name — this is what appears on every record</small>
+
+    <label for="poc">Contact person</label>
+    <input id="poc" name="pocName" required>
+
+    <label for="pocm">Contact number</label>
+    <input id="pocm" name="pocMobile" inputmode="numeric" placeholder="9876543210" required>
+
+    <label for="semail">Email</label>
+    <input id="semail" name="email" type="email" required>
+
+    <button class="go" type="submit">Register school and get code</button>
+  </form>
+
+  <div class="step">
+    <h3>Already registered?</h3>
+    <small>Enter the school code you were given to upload more students.</small>
+    <form id="formC">
+      <input id="ccode" placeholder="07KBO" maxlength="6" autocomplete="off"
+             style="text-transform:uppercase;font-family:ui-monospace,monospace;letter-spacing:1px" required>
+      <button class="go" type="submit">Continue</button>
+    </form>
+    <div id="cout"></div>
+  </div>
+</div>
+
+<!-- Step 2: upload the student sheet -->
+<div id="stage2" hidden>
+  <div class="result">
+    <div>School code</div>
+    <div class="big" id="bulkCode"></div>
+    <small id="bulkName"></small>
+  </div>
+
+  <div class="step">
+    <h3>Upload your student list</h3>
+    <p style="margin:10px 0 4px"><a class="tmpl" href="/api/template.xlsx">⬇ Download the template sheet</a></p>
+    <small>Columns: <b>Name, Email, Contact Number, Class</b>. Class must be 8, 9 or 10.</small>
+
+    <form id="formU">
+      <label for="file">Filled-in sheet (.xlsx or .csv)</label>
+      <input type="file" id="file" name="file" accept=".xlsx,.xls,.csv" required>
+      <button class="go" type="submit">Upload and generate roll numbers</button>
+    </form>
+  </div>
+</div>
+
+<div id="out"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+fetch('/api/options').then((r) => r.json()).then(({ districts }) => {
+  for (const { code, name } of districts) {
+    $('district').insertAdjacentHTML('beforeend', `<option value="${code}">${code} — ${name}</option>`);
+  }
+});
+
+function openUpload(code, name, studentCount) {
+  $('bulkCode').textContent = code;
+  $('bulkName').innerHTML = esc(name) + (studentCount ? `<br>${studentCount} student(s) already uploaded` : '');
+  $('stage1').hidden = true;
+  $('stage2').hidden = false;
+  $('out').innerHTML = '';
+  scrollTo(0, 0);
+}
+
+/* register a new school */
+$('formS').onsubmit = async (e) => {
+  e.preventDefault();
+  const btn = e.target.querySelector('button.go');
+  btn.disabled = true;
+  btn.textContent = 'registering…';
+  $('out').innerHTML = '';
+  try {
+    const r = await fetch('/api/schools', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(Object.fromEntries(new FormData(e.target))),
+    });
+    const d = await r.json();
+    if (d.error) $('out').innerHTML = `<div class="err">${d.error}</div>`;
+    else openUpload(d.code, d.name);
+  } catch (err) {
+    $('out').innerHTML = `<div class="err">${err.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Register school and get code';
+  }
+};
+
+/* come back later with an existing code */
+$('formC').onsubmit = async (e) => {
+  e.preventDefault();
+  const code = $('ccode').value.trim().toUpperCase();
+  $('cout').innerHTML = '';
+  const r = await fetch('/api/schools/' + encodeURIComponent(code));
+  const d = await r.json();
+  if (!r.ok) $('cout').innerHTML = `<div class="err">${d.error}</div>`;
+  else openUpload(d.code, `${d.name}, ${d.districtName}`, d.students);
+};
+
+/* upload the sheet */
+$('formU').onsubmit = async (e) => {
+  e.preventDefault();
+  const code = $('bulkCode').textContent;
+  const btn = e.target.querySelector('button.go');
+  btn.disabled = true;
+  btn.textContent = 'reading the sheet…';
+  $('out').innerHTML = '';
+
+  try {
+    const r = await fetch(`/api/schools/${encodeURIComponent(code)}/upload`, {
+      method: 'POST',
+      body: new FormData(e.target),
+    });
+    const d = await r.json();
+    if (d.error) {
+      $('out').innerHTML = `<div class="err">${d.error}</div>`;
+    } else {
+      $('out').innerHTML = renderUpload(d);
+      if (d.added.length) wireDownload(d);
+      e.target.reset();
+    }
+  } catch (err) {
+    $('out').innerHTML = `<div class="err">${err.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Upload and generate roll numbers';
+  }
+};
+
+function renderUpload(d) {
+  const rows = d.added.map((a) =>
+    `<tr><td class="roll">${esc(a.roll)}</td><td>${esc(a.name)}</td><td>${a.class}</td></tr>`).join('');
+  const bad = d.skipped.map((s) =>
+    `<tr class="bad"><td>row ${s.row}</td><td>${esc(s.name) || '—'}</td><td>${esc(s.reason)}</td></tr>`).join('');
+
+  return `
+    <div class="summary">
+      <div><b>${d.added.length}</b><small>roll numbers issued</small></div>
+      <div><b>${d.skipped.length}</b><small>skipped</small></div>
+    </div>
+    ${d.added.length ? `
+      <div class="step">
+        <h3>Roll numbers</h3>
+        <button class="go" id="dlcsv">Download this list (CSV)</button>
+        <div class="scroll"><table>
+          <thead><tr><th>Roll</th><th>Name</th><th>Class</th></tr></thead><tbody>${rows}</tbody>
+        </table></div>
+      </div>` : ''}
+    ${d.skipped.length ? `
+      <div class="step">
+        <h3>Skipped rows</h3>
+        <small>Fix these in your sheet and upload it again. Re-uploading is safe —
+        anyone who already has a roll number is skipped, not duplicated.</small>
+        <div class="scroll"><table>
+          <thead><tr><th>Where</th><th>Name</th><th>Why</th></tr></thead><tbody>${bad}</tbody>
+        </table></div>
+      </div>` : ''}`;
+}
+
+// Built from the JSON already on the page, so there is no endpoint that would
+// hand a school's full student list to anyone who guesses a 5-character code.
+function wireDownload(d) {
+  $('dlcsv').onclick = () => {
+    const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const csv = [
+      ['Roll Number', 'Name', 'Email', 'Contact Number', 'Class', 'School Code', 'School Name'].join(','),
+      ...d.added.map((a) => [a.roll, a.name, a.email, a.mobile, a.class, d.schoolCode, d.schoolName].map(q).join(',')),
+    ].join('\r\n');
+    const url = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `roll-numbers-${d.schoolCode}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+}
+</script>
