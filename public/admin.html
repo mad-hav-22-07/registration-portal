@@ -1,0 +1,62 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin — Registrations</title>
+
+<style>
+  body { max-width: 460px; margin: 60px auto; padding: 0 16px;
+         font: 15px/1.5 system-ui, sans-serif; color: #17212b; }
+  h2 { margin: 0 0 18px; }
+  label { display: block; font-weight: 600; font-size: 13px; margin: 14px 0 5px; }
+  input { width: 100%; padding: 10px; font: inherit; border: 1px solid #dfe3e8; border-radius: 8px; }
+  button { width: 100%; margin-top: 18px; padding: 12px; font: inherit; font-weight: 600;
+           color: #fff; background: #2b6cb0; border: 0; border-radius: 8px; cursor: pointer; }
+  button:disabled { background: #b8c2cc; }
+  .counts { display: flex; gap: 10px; margin-top: 20px; }
+  .counts div { flex: 1; padding: 14px; text-align: center; background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 10px; }
+  .counts b { display: block; font-size: 24px; }
+  .counts small { color: #7b8794; font-size: 12px; }
+  .err { margin-top: 16px; padding: 10px 12px; border-radius: 8px; background: #fff5f5; color: #c53030; font-size: 14px; }
+</style>
+
+<h2>Registrations</h2>
+
+<label for="key">Admin key</label>
+<input id="key" type="password" placeholder="ADMIN_KEY from .env">
+<button id="load">Show counts</button>
+
+<div id="counts"></div>
+<div id="out"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+// remembered per browser only, so the key is not retyped on every visit
+try { $('key').value = localStorage.getItem('adminKey') || ''; } catch {}
+
+$('load').onclick = async () => {
+  const key = $('key').value.trim();
+  if (!key) return;
+  try { localStorage.setItem('adminKey', key); } catch {}
+
+  $('out').innerHTML = '';
+  const r = await fetch('/api/stats', { headers: { 'x-admin-key': key } });
+  const d = await r.json();
+
+  if (d.error) {
+    $('counts').innerHTML = '';
+    $('out').innerHTML = `<div class="err">${d.error}</div>`;
+    return;
+  }
+
+  $('counts').innerHTML = `
+    <div><b>${d.schools}</b><small>schools</small></div>
+    <div><b>${d.students}</b><small>students</small></div>
+    <div><b>${d.teachers}</b><small>teachers</small></div>`;
+  $('out').innerHTML = `<button id="dl">Download Excel</button>`;
+
+  // the key has to ride in the URL here: a browser download is a plain
+  // navigation, so it cannot carry a custom header
+  $('dl').onclick = () => { location.href = '/api/export.xlsx?key=' + encodeURIComponent(key); };
+};
+</script>

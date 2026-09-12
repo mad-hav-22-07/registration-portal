@@ -1,0 +1,12 @@
+{
+  "name": "registration-portal",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node app.js" },
+  "dependencies": {
+    "dotenv": "^17.0.0",
+    "exceljs": "^4.4.0",
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  }
+}
